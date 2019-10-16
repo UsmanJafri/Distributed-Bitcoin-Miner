@@ -2,7 +2,6 @@ package main
 
 import (
 	"DistributedBitcoinMiner/bitcoin"
-	"bufio"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -47,38 +46,22 @@ func main() {
 	LOGF := log.New(file, "", log.Lshortfile|log.Lmicroseconds)
 	defer file.Close()
 	// ======================================================
-	writer := bufio.NewWriter(miner)
-	reader := bufio.NewReader(miner)
+
+	reader := json.NewDecoder(miner)
+	writer := json.NewEncoder(miner)
 
 	join := bitcoin.NewJoin()
-	messageAsBytes, err := json.Marshal(join)
+	err = writer.Encode(join)
 	if err != nil {
-		LOGF.Println("Error marshalling Join:", err)
-		return
-	}
-	_, err = writer.Write(messageAsBytes)
-	if err != nil {
-		LOGF.Println("Error writing Join:", err)
-		return
-	}
-	err = writer.Flush()
-	if err != nil {
-		LOGF.Println("Error flushing Join:", err)
-		return
+		LOGF.Println("Error sending Join:", err)
 	}
 	LOGF.Println("SENT:", join.String())
 
+	var request bitcoin.Message
 	for {
-		readBuffer := make([]byte, 1024)
-		readLen, err := reader.Read(readBuffer)
+		err := reader.Decode(&request)
 		if err != nil {
 			LOGF.Println("Error reading Request:", err)
-			return
-		}
-		var request bitcoin.Message
-		err = json.Unmarshal(readBuffer[:readLen], &request)
-		if err != nil {
-			LOGF.Println("Error unmarshalling Request:", err)
 			return
 		}
 		LOGF.Println("RECV:", request.String())
@@ -94,20 +77,9 @@ func main() {
 		}
 
 		result := bitcoin.NewResult(minHash, minNonce)
-		messageAsBytes, err := json.Marshal(result)
+		err = writer.Encode(result)
 		if err != nil {
-			LOGF.Println("Error marshalling Result:", err)
-			return
-		}
-		_, err = writer.Write(messageAsBytes)
-		if err != nil {
-			LOGF.Println("Error writing Result:", err)
-			return
-		}
-		err = writer.Flush()
-		if err != nil {
-			LOGF.Println("Error flushing Result:", err)
-			return
+			LOGF.Println("Error sending Result:", err)
 		}
 		LOGF.Println("SENT:", result.String())
 	}

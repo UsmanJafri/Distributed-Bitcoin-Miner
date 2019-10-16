@@ -2,7 +2,6 @@ package main
 
 import (
 	"DistributedBitcoinMiner/bitcoin"
-	"bufio"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -15,17 +14,24 @@ type server struct {
 	listener    net.Listener
 	clientJoin  chan client
 	minerJoin   chan miner
-	minerResult chan bitcoin.Message
+	minerResult chan minerResult
 }
 
 type miner struct {
 	toMiner chan bitcoin.Message
+	conn    net.Conn
+	reader  *json.Decoder
 }
 
 type client struct {
-	job      bitcoin.Message
-	toClient chan bitcoin.Message
-	assigned bool
+	job        bitcoin.Message
+	toClient   chan bitcoin.Message
+	assignedTo int
+}
+
+type minerResult struct {
+	ID     int
+	result bitcoin.Message
 }
 
 func startServer(port int) (*server, error) {
@@ -34,7 +40,7 @@ func startServer(port int) (*server, error) {
 	srv.listener = listener
 	srv.clientJoin = make(chan client)
 	srv.minerJoin = make(chan miner)
-	srv.minerResult = make(chan bitcoin.Message)
+	srv.minerResult = make(chan minerResult)
 	return srv, err
 }
 
@@ -89,90 +95,86 @@ func (srv *server) acceptAndIdentify() {
 			LOGF.Println("Error accepting connection:", err)
 			return
 		}
-		reader := bufio.NewReader(conn)
-		readBuffer := make([]byte, 1024)
-		readLen, err := reader.Read(readBuffer)
+		reader := json.NewDecoder(conn)
+		var message bitcoin.Message
+		err = reader.Decode(&message)
 		if err != nil {
 			LOGF.Println("Error reading first message:", err)
 			return
 		}
-		var message bitcoin.Message
-		err = json.Unmarshal(readBuffer[:readLen], &message)
-		if err != nil {
-			LOGF.Println("Error unmarshalling first message:", err)
-			return
-		}
 		if message.Type == bitcoin.Join {
-			toMiner := make(chan bitcoin.Message)
-			go minerHandler(conn, reader, toMiner, srv.minerResult)
-			srv.minerJoin <- miner{toMiner}
+			newMiner := miner{make(chan bitcoin.Message), conn, reader}
+			srv.minerJoin <- newMiner
 		} else if message.Type == bitcoin.Request {
 			toClient := make(chan bitcoin.Message)
-			srv.clientJoin <- client{message, toClient, false}
+			srv.clientJoin <- client{message, toClient, -1}
 			go clientHandler(conn, toClient)
 		}
 	}
 
 }
 
-func clientHandler(conn net.Conn, toClient chan bitcoin.Message) {
-	writer := bufio.NewWriter(conn)
+func clientHandler(conn net.Conn, toClient <-chan bitcoin.Message) {
 	message := <-toClient
-	messageAsBytes, err := json.Marshal(message)
+	err := json.NewEncoder(conn).Encode(message)
 	if err != nil {
-		LOGF.Println("Error marshalling Result:", err)
-		return
-	}
-	_, err = writer.Write(messageAsBytes)
-	if err != nil {
-		LOGF.Println("Error writing Result:", err)
-		return
-	}
-	err = writer.Flush()
-	if err != nil {
-		LOGF.Println("Error flushing Result:", err)
-		return
+		LOGF.Println("Error sending Result:", err)
 	}
 	LOGF.Println("RESULT TO CLIENT:", message.String())
 	conn.Close()
 }
 
-func minerHandler(conn net.Conn, reader *bufio.Reader, toMiner chan bitcoin.Message, toScheduler chan bitcoin.Message) {
-	defer conn.Close()
-	writer := bufio.NewWriter(conn)
+func (myMiner *miner) minerReader(ID int, toScheduler chan minerResult) {
+	defer myMiner.conn.Close()
+
+	var result bitcoin.Message
+	for {
+		err := myMiner.reader.Decode(&result)
+		if err != nil {
+			LOGF.Println("MINER: Error reading Result:", err)
+			return
+		}
+		toScheduler <- minerResult{ID, result}
+		LOGF.Println("RECV FROM MINER:", result.String())
+	}
+}
+
+func minerQueue(fromScheduler, toMiner chan bitcoin.Message) {
+	queue := make([]bitcoin.Message, 0)
+	dequeueChan := make(chan bitcoin.Message, 1)
+	for {
+		select {
+		case enqueue := <-fromScheduler:
+			queue = append(queue, enqueue)
+		case message := <-dequeueChan:
+			select {
+			case toMiner <- message:
+			default:
+				dequeueChan <- message
+			}
+		default:
+			if len(queue) > 0 {
+				select {
+				case dequeueChan <- queue[0]:
+					queue = queue[1:]
+				}
+			}
+		}
+	}
+}
+
+func (myMiner *miner) minerWriter() {
+	toMiner := make(chan bitcoin.Message)
+	writer := json.NewEncoder(myMiner.conn)
+	go minerQueue(myMiner.toMiner, toMiner)
 	for {
 		message := <-toMiner
-		messageAsBytes, err := json.Marshal(message)
+		err := writer.Encode(message)
 		if err != nil {
-			LOGF.Println("Error marshalling Request:", err)
-			return
-		}
-		_, err = writer.Write(messageAsBytes)
-		if err != nil {
-			LOGF.Println("Error writing Request:", err)
-			return
-		}
-		err = writer.Flush()
-		if err != nil {
-			LOGF.Println("Error flushing Request:", err)
+			LOGF.Println("MINER: Error sending Request:", err)
 			return
 		}
 		LOGF.Println("SENT TO MINER:", message.String())
-
-		readBuffer := make([]byte, 1024)
-		readLen, err := reader.Read(readBuffer)
-		if err != nil {
-			LOGF.Println("Error reading Result:", err)
-			return
-		}
-		var result bitcoin.Message
-		err = json.Unmarshal(readBuffer[:readLen], &result)
-		if err != nil {
-			LOGF.Println("Error unmarshalling Result:", err)
-			return
-		}
-		toScheduler <- result
-		LOGF.Println("RECV FROM MINER:", result.String())
 	}
 }
 
@@ -180,29 +182,41 @@ func (srv *server) scheduler() {
 	clientID := 0
 	clients := make(map[int]client)
 	minerID := 0
+	lastAssignedMiner := 0
 	var miners []miner
 	for {
 		select {
 		case clientJoin := <-srv.clientJoin:
 			LOGF.Println("JOB:", clientJoin.job.String())
 			if len(miners) > 0 {
-				miners[0].toMiner <- clientJoin.job
+				clientJoin.assignedTo = lastAssignedMiner
+				miners[lastAssignedMiner].toMiner <- clientJoin.job
+				lastAssignedMiner = (1 + lastAssignedMiner) % len(miners)
 			}
 			clients[clientID] = clientJoin
 			clientID++
 		case minerJoin := <-srv.minerJoin:
 			miners = append(miners, minerJoin)
+			go minerJoin.minerReader(minerID, srv.minerResult)
+			go minerJoin.minerWriter()
 			minerID++
-			for _, client := range clients {
-				if !client.assigned {
-					client.assigned = true
-					miners[0].toMiner <- client.job
+			for clientID, client := range clients {
+				if client.assignedTo == -1 {
+					client.assignedTo = lastAssignedMiner
+					miners[lastAssignedMiner].toMiner <- client.job
+					lastAssignedMiner = (1 + lastAssignedMiner) % len(miners)
+					clients[clientID] = client
 				}
 			}
 		case minerResult := <-srv.minerResult:
-			clients[clientID-1].toClient <- minerResult
-			delete(clients, clientID-1)
+			for clientID, client := range clients {
+				if client.assignedTo == minerResult.ID {
+					client.toClient <- minerResult.result
+					delete(clients, clientID)
+					break
+				}
+			}
+
 		}
 	}
-
 }

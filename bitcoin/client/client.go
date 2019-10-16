@@ -2,7 +2,6 @@ package main
 
 import (
 	"DistributedBitcoinMiner/bitcoin"
-	"bufio"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -37,7 +36,7 @@ func main() {
 
 	// LOGGER ======================================================
 	const (
-		name = "/home/usman/go/src//DistributedBitcoinMiner/bitcoin/client/log.txt"
+		name = "/home/usman/go/src/DistributedBitcoinMiner/bitcoin/client/log.txt"
 		flag = os.O_RDWR | os.O_CREATE | os.O_TRUNC
 		perm = os.FileMode(0666)
 	)
@@ -50,38 +49,19 @@ func main() {
 	defer file.Close()
 	// ======================================================
 
-	reader := bufio.NewReader(client)
-	writer := bufio.NewWriter(client)
-
 	request := bitcoin.NewRequest(message, 0, maxNonce)
-	messageAsBytes, err := json.Marshal(request)
+	err = json.NewEncoder(client).Encode(request)
 	if err != nil {
-		LOGF.Println("Error marshalling Request:", err)
-		return
-	}
-	_, err = writer.Write(messageAsBytes)
-	if err != nil {
-		LOGF.Println("Error writing Request:", err)
-		return
-	}
-	err = writer.Flush()
-	if err != nil {
-		LOGF.Println("Error flushing Request:", err)
+		LOGF.Println("Error sending Request:", err)
 		return
 	}
 	LOGF.Println("SENT:", request.String())
 
-	readBuffer := make([]byte, 1024)
-	readLen, err := reader.Read(readBuffer)
+	var result bitcoin.Message
+	err = json.NewDecoder(client).Decode(&result)
 	if err != nil {
 		LOGF.Println("Error reading Result:", err)
 		printDisconnected()
-		return
-	}
-	var result bitcoin.Message
-	err = json.Unmarshal(readBuffer[:readLen], &result)
-	if err != nil {
-		LOGF.Println("Error unmarshalling Result:", err)
 		return
 	}
 	LOGF.Println("RECV:", result.String())
