@@ -34,7 +34,7 @@ func main() {
 
 	// LOGGER ======================================================
 	const (
-		name = "/home/usman/go/src/DistributedBitcoinMiner/bitcoin/miner/log.txt"
+		name = "/home/usman/go/src/DistributedBitcoinMiner/bitcoin/miner_log.txt"
 		flag = os.O_RDWR | os.O_CREATE | os.O_TRUNC
 		perm = os.FileMode(0666)
 	)
@@ -54,6 +54,7 @@ func main() {
 	err = writer.Encode(join)
 	if err != nil {
 		LOGF.Println("Error sending Join:", err)
+		return
 	}
 	LOGF.Println("SENT:", join.String())
 
@@ -80,6 +81,7 @@ func main() {
 		err = writer.Encode(result)
 		if err != nil {
 			LOGF.Println("Error sending Result:", err)
+			return
 		}
 		LOGF.Println("SENT:", result.String())
 	}

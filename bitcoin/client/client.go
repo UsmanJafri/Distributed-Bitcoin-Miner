@@ -36,7 +36,7 @@ func main() {
 
 	// LOGGER ======================================================
 	const (
-		name = "/home/usman/go/src/DistributedBitcoinMiner/bitcoin/client/log.txt"
+		name = "/home/usman/go/src/DistributedBitcoinMiner/bitcoin/client_log.txt"
 		flag = os.O_RDWR | os.O_CREATE | os.O_TRUNC
 		perm = os.FileMode(0666)
 	)
