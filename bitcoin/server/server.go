@@ -11,19 +11,14 @@ import (
 )
 
 type server struct {
-	listener          net.Listener
-	clientJoin        chan client
-	clientLeave       chan int
-	minerJoin         chan miner
-	minerResult       chan chunk
-	minerLeave        chan int
-	clientID          int
-	minerID           int
-	lastAssignedMiner int
-	clients           map[int]client
-	miners            map[int]miner
-	minerQueueSize    int
-	chunkSize         uint64
+	listener       net.Listener
+	clientJoin     chan client
+	clientLeave    chan int
+	minerJoin      chan miner
+	minerLeave     chan int
+	minerResult    chan chunk
+	minerQueueSize int
+	chunkSize      uint64
 }
 
 type miner struct {
@@ -33,6 +28,7 @@ type miner struct {
 }
 
 type client struct {
+	ID       int
 	toClient chan bitcoin.Message
 	job      bitcoin.Message
 	conn     net.Conn
@@ -54,19 +50,14 @@ func startServer(port int) (*server, error) {
 	srv.clientJoin = make(chan client)
 	srv.clientLeave = make(chan int)
 	srv.minerJoin = make(chan miner)
-	srv.minerResult = make(chan chunk)
 	srv.minerLeave = make(chan int)
-	srv.clientID = 0
-	srv.minerID = 0
-	srv.lastAssignedMiner = 0
-	srv.clients = make(map[int]client)
-	srv.miners = make(map[int]miner)
+	srv.minerResult = make(chan chunk)
 	srv.minerQueueSize = 10
 	srv.chunkSize = 50000
 	return srv, err
 }
 
-var LOGF *log.Logger
+var logf *log.Logger
 
 func main() {
 	// You may need a logger for debug purpose
@@ -82,7 +73,7 @@ func main() {
 	}
 	defer file.Close()
 
-	LOGF = log.New(file, "", log.Lshortfile|log.Lmicroseconds)
+	logf = log.New(file, "", log.Lshortfile|log.Lmicroseconds)
 	// Usage: LOGF.Println() or LOGF.Printf()
 
 	const numArgs = 2
@@ -115,41 +106,42 @@ func (srv *server) acceptAndIdentify() {
 	for {
 		conn, err := srv.listener.Accept()
 		if err != nil {
-			LOGF.Println("Error accepting connection:", err)
+			logf.Println("Error accepting connection:", err)
 			return
 		}
 		reader := json.NewDecoder(conn)
 		err = reader.Decode(&message)
 		if err != nil {
-			LOGF.Println("Error reading first message:", err)
+			logf.Println("Error reading first message:", err)
 			continue
 		}
 		if message.Type == bitcoin.Join {
 			srv.minerJoin <- miner{make(chan chunk, srv.minerQueueSize), conn, reader}
 		} else if message.Type == bitcoin.Request {
-			srv.clientJoin <- client{make(chan bitcoin.Message), message, conn, make(map[uint64]chunk)}
+			srv.clientJoin <- client{-1, make(chan bitcoin.Message), message, conn, nil}
 		}
 	}
 
 }
 
-func (myClient *client) clientHandler(ID int, leave chan<- int) {
+func (myClient *client) clientHandler(leave chan<- int) {
 	message := <-myClient.toClient
 	err := json.NewEncoder(myClient.conn).Encode(message)
 	if err != nil {
-		LOGF.Println("Error sending Result:", err)
+		logf.Println("Error sending Result:", err)
 	}
-	leave <- ID
+	leave <- myClient.ID
 	myClient.conn.Close()
 }
 
-func (myClient *client) createChunks(chunkSize uint64, clientID int) {
+func (myClient *client) createChunks(chunkSize uint64) {
+	myClient.chunks = make(map[uint64]chunk)
 	for lower := myClient.job.Lower; lower < myClient.job.Upper; lower += chunkSize {
 		upper := lower + chunkSize
 		if upper > myClient.job.Upper {
 			upper = myClient.job.Upper
 		}
-		newChunk := chunk{lower, clientID, -1, *bitcoin.NewRequest(myClient.job.Data, lower, upper), nil}
+		newChunk := chunk{lower, myClient.ID, -1, *bitcoin.NewRequest(myClient.job.Data, lower, upper), nil}
 		myClient.chunks[lower] = newChunk
 	}
 }
@@ -160,14 +152,14 @@ func (myMiner *miner) minerHandler(toScheduler chan<- chunk, leave chan<- int, I
 		chunk := <-myMiner.toMiner
 		err := writer.Encode(chunk.request)
 		if err != nil {
-			LOGF.Println("MINER: Error sending Request:", err)
+			logf.Println("MINER: Error sending Request:", err)
 			break
 		}
 
 		var result bitcoin.Message
 		err = myMiner.reader.Decode(&result)
 		if err != nil {
-			LOGF.Println("MINER: Error reading Result:", err)
+			logf.Println("MINER: Error reading Result:", err)
 			break
 		}
 		chunk.result = &result
@@ -179,67 +171,86 @@ func (myMiner *miner) minerHandler(toScheduler chan<- chunk, leave chan<- int, I
 }
 
 func (srv *server) scheduler() {
+	minerID := 0
+	clientID := 0
 	lastAssignedClient := -1
+	clients := make([]client, 0)
+	miners := make(map[int]miner)
 	failedMiners := make([]int, 0)
 
 	for {
 		select {
 		case clientJoin := <-srv.clientJoin:
-			LOGF.Println("CLIENT JOIN:", srv.clientID, "|", clientJoin.job.String())
-			clientJoin.createChunks(srv.chunkSize, srv.clientID)
-			go clientJoin.clientHandler(srv.clientID, srv.clientLeave)
-			srv.clients[srv.clientID] = clientJoin
-			srv.clientID++
+			logf.Println("CLIENT JOIN:", clientID, "|", clientJoin.job.String())
+			clientJoin.ID = clientID
+			clientJoin.createChunks(srv.chunkSize)
+			go clientJoin.clientHandler(srv.clientLeave)
+			clients = append(clients, clientJoin)
+			clientID++
 		case clientLeave := <-srv.clientLeave:
-			LOGF.Println("CLIENT LEAVE:", clientLeave)
-			// delete(srv.clients, clientLeave)
+			logf.Println("CLIENT LEAVE:", clientLeave)
+			index := -1
+			for clientIndex, client := range clients {
+				if client.ID == clientLeave {
+					index = clientIndex
+					break
+				}
+			}
+			clients = append(clients[:index], clients[index+1:]...)
 		case minerJoin := <-srv.minerJoin:
-			LOGF.Println("MINER JOIN:", srv.minerID)
-			srv.miners[srv.minerID] = minerJoin
-			go minerJoin.minerHandler(srv.minerResult, srv.minerLeave, srv.minerID)
-			srv.minerID++
+			logf.Println("MINER JOIN:", minerID)
+			miners[minerID] = minerJoin
+			go minerJoin.minerHandler(srv.minerResult, srv.minerLeave, minerID)
+			minerID++
 		case minerLeave := <-srv.minerLeave:
-			LOGF.Println("MINER LEAVE:", minerLeave)
-			for clientID, client := range srv.clients {
+			logf.Println("MINER LEAVE:", minerLeave)
+			for clientID, client := range clients {
 				for chunkID, chunk := range client.chunks {
 					if chunk.minerID == minerLeave && chunk.result == nil {
 						chunk.minerID = -1
-						srv.clients[clientID].chunks[chunkID] = chunk
+						clients[clientID].chunks[chunkID] = chunk
 						failedMiners = append(failedMiners, minerLeave)
-						LOGF.Println("FAILED:", minerLeave)
+						logf.Println("FAILED:", minerLeave)
 					}
 				}
 			}
-			delete(srv.miners, minerLeave)
+			delete(miners, minerLeave)
 		case minerResult := <-srv.minerResult:
-			LOGF.Println("CHUNK RESULT:", minerResult.result.String())
-			srv.clients[minerResult.clientID].chunks[minerResult.chunkID] = minerResult
+			logf.Println("CHUNK  RESULT:", minerResult.minerID, "|", minerResult.clientID, "|", minerResult.result.String())
+			index := -1
+			for clientIndex, client := range clients {
+				if client.ID == minerResult.clientID {
+					index = clientIndex
+					break
+				}
+			}
+			clients[index].chunks[minerResult.chunkID] = minerResult
 			allChunksDone := true
-			for _, chunk := range srv.clients[minerResult.clientID].chunks {
+			for _, chunk := range clients[index].chunks {
 				if chunk.result == nil {
 					allChunksDone = false
 					break
 				}
 			}
 			if allChunksDone {
-				minNonce := srv.clients[minerResult.clientID].chunks[0].result.Nonce
-				minHash := srv.clients[minerResult.clientID].chunks[0].result.Hash
-				for _, chunk := range srv.clients[minerResult.clientID].chunks {
+				minNonce := clients[index].chunks[0].result.Nonce
+				minHash := clients[index].chunks[0].result.Hash
+				for _, chunk := range clients[index].chunks {
 					if chunk.result.Hash < minHash {
 						minNonce = chunk.result.Nonce
 						minHash = chunk.result.Hash
 					}
 				}
 				result := *bitcoin.NewResult(minHash, minNonce)
-				srv.clients[minerResult.clientID].toClient <- result
-				LOGF.Println("RESULT TO CLIENT:", minerResult.clientID, "|", result.String())
+				clients[index].toClient <- result
+				logf.Println("RESULT TO CLIENT:", minerResult.clientID, "|", result.String())
 			}
 		default:
-			if len(srv.miners) > 0 {
-				lastAssignedClient = (lastAssignedClient + 1) % len(srv.clients)
+			if len(miners) > 0 && len(clients) > 0 {
+				lastAssignedClient = (lastAssignedClient + 1) % len(clients)
 				var chunkToAssign chunk
 				found := false
-				for _, chunk := range srv.clients[lastAssignedClient].chunks {
+				for _, chunk := range clients[lastAssignedClient].chunks {
 					if chunk.minerID == -1 && chunk.result == nil {
 						found = true
 						chunkToAssign = chunk
@@ -248,12 +259,12 @@ func (srv *server) scheduler() {
 				}
 				if found {
 					done := false
-					for minerID, miner := range srv.miners {
+					for minerID, miner := range miners {
+						chunkToAssign.minerID = minerID
 						select {
 						case miner.toMiner <- chunkToAssign:
-							chunkToAssign.minerID = minerID
-							srv.clients[lastAssignedClient].chunks[chunkToAssign.chunkID] = chunkToAssign
-							LOGF.Println("CHUNK REQUEST:", minerID, "|", chunkToAssign.request.String())
+							clients[lastAssignedClient].chunks[chunkToAssign.chunkID] = chunkToAssign
+							logf.Println("CHUNK REQUEST:", minerID, "|", chunkToAssign.clientID, "|", chunkToAssign.request.String())
 							done = true
 						default:
 						}
