@@ -1,7 +1,7 @@
 package main
 
 import (
-	"Distributed-Bitcoin-Miner/bitcoin"
+	bitcoin "Distributed-Bitcoin-Miner"
 	"encoding/json"
 	"fmt"
 	"net"
