@@ -1,16 +1,15 @@
 package main
 
 import (
-	"DistributedBitcoinMiner/bitcoin"
+	"Distributed-Bitcoin-Miner/bitcoin"
 	"encoding/json"
 	"fmt"
-	"log"
 	"net"
 	"os"
 	"strconv"
 )
 
-var LOGF *log.Logger
+// var LOGF *log.Logger
 
 func main() {
 	const numArgs = 4
@@ -35,38 +34,44 @@ func main() {
 	defer client.Close()
 
 	// LOGGER ======================================================
-	const (
-		name = "/home/usman/go/src/DistributedBitcoinMiner/bitcoin/client_log.txt"
-		flag = os.O_RDWR | os.O_CREATE | os.O_TRUNC
-		perm = os.FileMode(0666)
-	)
-	file, err := os.OpenFile(name, flag, perm)
-	if err != nil {
-		return
+	// const (
+	// 	name = "/home/usman/go/src/Distributed-Bitcoin-Miner/bitcoin/client_log.txt"
+	// 	flag = os.O_RDWR | os.O_CREATE | os.O_TRUNC
+	// 	perm = os.FileMode(0666)
+	// )
+	// file, err := os.OpenFile(name, flag, perm)
+	// if err != nil {
+	// 	return
 
-	}
-	LOGF := log.New(file, "", log.Lshortfile|log.Lmicroseconds)
-	defer file.Close()
+	// }
+	// LOGF := log.New(file, "", log.Lshortfile|log.Lmicroseconds)
+	// defer file.Close()
 	// ======================================================
 
 	request := bitcoin.NewRequest(message, 0, maxNonce)
 	err = json.NewEncoder(client).Encode(request)
 	if err != nil {
-		LOGF.Println("Error sending Request:", err)
+		// LOGF.Println("Error sending Request:", err)
 		return
 	}
-	LOGF.Println("SENT:", request.String())
+	// LOGF.Println("SENT:", request.String())
 
 	var result bitcoin.Message
-	err = json.NewDecoder(client).Decode(&result)
-	if err != nil {
-		LOGF.Println("Error reading Result:", err)
-		printDisconnected()
-		return
-	}
-	LOGF.Println("RECV:", result.String())
+	reader := json.NewDecoder(client)
+	for {
+		err = reader.Decode(&result)
+		if err != nil {
+			// LOGF.Println("Error reading Result:", err)
+			printDisconnected()
+			return
+		}
+		// LOGF.Println("RECV:", result.String())
 
-	printResult(result.Hash, result.Nonce)
+		if result.Type == bitcoin.Result {
+			printResult(result.Hash, result.Nonce)
+			return
+		}
+	}
 }
 
 // printResult prints the final result to stdout.
