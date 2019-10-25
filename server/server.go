@@ -129,7 +129,7 @@ func (myClient *client) clientHandler(leave chan<- int, pingInterval time.Durati
 	writer := json.NewEncoder(myClient.conn)
 	for {
 		select {
-		case <-time.After(pingInterval * time.Millisecond):
+		case <-time.After(pingInterval):
 			err := writer.Encode(*bitcoin.NewJoin())
 			if err != nil {
 				// logf.Println("CLIENT | PREMATURE LEAVE |", myClient.ID)
